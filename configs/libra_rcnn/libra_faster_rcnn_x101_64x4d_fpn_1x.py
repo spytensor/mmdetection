@@ -1,58 +1,64 @@
 # model settings
 model = dict(
-    type='MaskRCNN',
-    pretrained='open-mmlab://resnet50_caffe',
+    type='FasterRCNN',
+    pretrained='open-mmlab://resnext101_64x4d',
     backbone=dict(
-        type='ResNet',
-        depth=50,
-        num_stages=3,
-        strides=(1, 2, 2),
-        dilations=(1, 1, 1),
-        out_indices=(2, ),
+        type='ResNeXt',
+        depth=101,
+        groups=64,
+        base_width=4,
+        num_stages=4,
+        out_indices=(0, 1, 2, 3),
         frozen_stages=1,
-        normalize=dict(type='BN', requires_grad=False),
-        norm_eval=True,
-        style='caffe'),
-    shared_head=dict(
-        type='ResLayer',
-        depth=50,
-        stage=3,
-        stride=2,
-        dilation=1,
-        style='caffe',
-        normalize=dict(type='BN', requires_grad=False),
-        norm_eval=True),
+        style='pytorch'),
+    neck=[
+        dict(
+            type='FPN',
+            in_channels=[256, 512, 1024, 2048],
+            out_channels=256,
+            num_outs=5),
+        dict(
+            type='BFP',
+            in_channels=256,
+            num_levels=5,
+            refine_level=2,
+            refine_type='non_local')
+    ],
     rpn_head=dict(
         type='RPNHead',
-        in_channels=1024,
-        feat_channels=1024,
-        anchor_scales=[2, 4, 8, 16, 32],
+        in_channels=256,
+        feat_channels=256,
+        anchor_scales=[8],
         anchor_ratios=[0.5, 1.0, 2.0],
-        anchor_strides=[16],
+        anchor_strides=[4, 8, 16, 32, 64],
         target_means=[.0, .0, .0, .0],
         target_stds=[1.0, 1.0, 1.0, 1.0],
-        use_sigmoid_cls=True),
+        loss_cls=dict(
+            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
+        loss_bbox=dict(type='SmoothL1Loss', beta=1.0 / 9.0, loss_weight=1.0)),
     bbox_roi_extractor=dict(
         type='SingleRoIExtractor',
-        roi_layer=dict(type='RoIAlign', out_size=14, sample_num=2),
-        out_channels=1024,
-        featmap_strides=[16]),
+        roi_layer=dict(type='RoIAlign', out_size=7, sample_num=2),
+        out_channels=256,
+        featmap_strides=[4, 8, 16, 32]),
     bbox_head=dict(
-        type='BBoxHead',
-        with_avg_pool=True,
+        type='SharedFCBBoxHead',
+        num_fcs=2,
+        in_channels=256,
+        fc_out_channels=1024,
         roi_feat_size=7,
-        in_channels=2048,
         num_classes=81,
         target_means=[0., 0., 0., 0.],
         target_stds=[0.1, 0.1, 0.2, 0.2],
-        reg_class_agnostic=False),
-    mask_roi_extractor=None,
-    mask_head=dict(
-        type='FCNMaskHead',
-        num_convs=0,
-        in_channels=2048,
-        conv_out_channels=256,
-        num_classes=81))
+        reg_class_agnostic=False,
+        loss_cls=dict(
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
+        loss_bbox=dict(
+            type='BalancedL1Loss',
+            alpha=0.5,
+            gamma=1.5,
+            beta=1.0,
+            loss_weight=1.0)))
 # model training and testing settings
 train_cfg = dict(
     rpn=dict(
@@ -66,15 +72,14 @@ train_cfg = dict(
             type='RandomSampler',
             num=256,
             pos_fraction=0.5,
-            neg_pos_ub=-1,
+            neg_pos_ub=5,
             add_gt_as_proposals=False),
-        allowed_border=0,
+        allowed_border=-1,
         pos_weight=-1,
-        smoothl1_beta=1 / 9.0,
         debug=False),
     rpn_proposal=dict(
         nms_across_levels=False,
-        nms_pre=12000,
+        nms_pre=2000,
         nms_post=2000,
         max_num=2000,
         nms_thr=0.7,
@@ -87,34 +92,38 @@ train_cfg = dict(
             min_pos_iou=0.5,
             ignore_iof_thr=-1),
         sampler=dict(
-            type='RandomSampler',
+            type='CombinedSampler',
             num=512,
             pos_fraction=0.25,
-            neg_pos_ub=-1,
-            add_gt_as_proposals=True),
-        mask_size=14,
+            add_gt_as_proposals=True,
+            pos_sampler=dict(type='InstanceBalancedPosSampler'),
+            neg_sampler=dict(
+                type='IoUBalancedNegSampler',
+                floor_thr=-1,
+                floor_fraction=0,
+                num_bins=3)),
         pos_weight=-1,
         debug=False))
 test_cfg = dict(
     rpn=dict(
         nms_across_levels=False,
-        nms_pre=6000,
+        nms_pre=1000,
         nms_post=1000,
         max_num=1000,
         nms_thr=0.7,
         min_bbox_size=0),
     rcnn=dict(
-        score_thr=0.05,
-        nms=dict(type='nms', iou_thr=0.5),
-        max_per_img=100,
-        mask_thr_binary=0.5))
+        score_thr=0.05, nms=dict(type='nms', iou_thr=0.5), max_per_img=100)
+    # soft-nms is also supported for rcnn testing
+    # e.g., nms=dict(type='soft_nms', iou_thr=0.5, min_score=0.05)
+)
 # dataset settings
 dataset_type = 'CocoDataset'
 data_root = 'data/coco/'
 img_norm_cfg = dict(
-    mean=[102.9801, 115.9465, 122.7717], std=[1.0, 1.0, 1.0], to_rgb=False)
+    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 data = dict(
-    imgs_per_gpu=1,
+    imgs_per_gpu=2,
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
@@ -124,7 +133,7 @@ data = dict(
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
         flip_ratio=0.5,
-        with_mask=True,
+        with_mask=False,
         with_crowd=True,
         with_label=True),
     val=dict(
@@ -135,7 +144,7 @@ data = dict(
         img_norm_cfg=img_norm_cfg,
         size_divisor=32,
         flip_ratio=0,
-        with_mask=True,
+        with_mask=False,
         with_crowd=True,
         with_label=True),
     test=dict(
@@ -150,7 +159,7 @@ data = dict(
         with_label=False,
         test_mode=True))
 # optimizer
-optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001)
+optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 lr_config = dict(
@@ -172,7 +181,7 @@ log_config = dict(
 total_epochs = 12
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = './work_dirs/mask_rcnn_r50_c4_1x'
+work_dir = './work_dirs/libra_faster_rcnn_x101_64x4d_fpn_1x'
 load_from = None
 resume_from = None
 workflow = [('train', 1)]
